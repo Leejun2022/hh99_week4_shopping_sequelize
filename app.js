@@ -1,94 +1,58 @@
 const express = require("express");
-const mongoose = require("mongoose");
-const Joi = require("joi");
+const { Op } = require("sequelize");
 const jwt = require("jsonwebtoken");
-const User = require("./models/user");
-const Goods = require("./models/goods");
-const Cart = require("./models/cart");
+const { User, Cart, Goods } = require("./models");
 const authMiddleware = require("./middlewares/auth-middleware");
-
-mongoose.connect("mongodb://localhost/shopping-demo", {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-});
-const db = mongoose.connection;
-db.on("error", console.error.bind(console, "connection error:"));
 
 const app = express();
 const router = express.Router();
 
-const postUsersSchema = Joi.object({
-  nickname: Joi.string().required(),
-  email: Joi.string().email().required(),
-  password: Joi.string().required(),
-  confirmPassword: Joi.string().required(),
-});
+app.use(express.static("assets"));
+app.use(express.json());
 
 router.post("/users", async (req, res) => {
-  try {
-    const {
-      nickname,
-      email,
-      password,
-      confirmPassword,
-    } = await postUsersSchema.validateAsync(req.body);
+  const { nickname, email, password, confirmPassword } = req.body;
 
-    if (password !== confirmPassword) {
-      res.status(400).send({
-        errorMessage: "패스워드가 패스워드 확인란과 동일하지 않습니다.",
-      });
-      return;
-    }
-
-    const existUsers = await User.find({
-      $or: [{ email }, { nickname }],
-    });
-    if (existUsers.length) {
-      res.status(400).send({
-        errorMessage: "이미 가입된 이메일 또는 닉네임이 있습니다.",
-      });
-      return;
-    }
-
-    const user = new User({ email, nickname, password });
-    await user.save();
-
-    res.status(201).send({});
-  } catch (err) {
-    console.log(err);
+  if (password !== confirmPassword) {
     res.status(400).send({
-      errorMessage: "요청한 데이터 형식이 올바르지 않습니다.",
+      errorMessage: "패스워드가 패스워드 확인란과 동일하지 않습니다.",
     });
+    return;
   }
+
+  const existUsers = await User.findAll({
+    where: {
+      [Op.or]: [{ nickname }, { email }],
+    },
+  });
+  if (existUsers.length) {
+    res.status(400).send({
+      errorMessage: "이미 가입된 이메일 또는 닉네임이 있습니다.",
+    });
+    return;
+  }
+
+  await User.create({ email, nickname, password });
+
+  res.status(201).send({ message: "회원 가입에 성공하였습니다." });
 });
 
-const postAuthSchema = Joi.object({
-  email: Joi.string().email().required(),
-  password: Joi.string().required(),
-});
 router.post("/auth", async (req, res) => {
-  try {
-    const { email, password } = await postAuthSchema.validateAsync(req.body);
+  const { email, password } = req.body;
 
-    const user = await User.findOne({ email, password }).exec();
+  const user = await User.findOne({ where: { email, password } });
 
-    if (!user) {
-      res.status(400).send({
-        errorMessage: "이메일 또는 패스워드가 잘못됐습니다.",
-      });
-      return;
-    }
-
-    const token = jwt.sign({ userId: user.userId }, "leejun-secret-key");
-    res.send({
-      token,
-    });
-  } catch (err) {
-      console.log(err);
+  if (!user) {
     res.status(400).send({
-      errorMessage: "요청한 데이터 형식이 올바르지 않습니다.",
+      errorMessage: "이메일 또는 패스워드가 잘못됐습니다.",
     });
+    return;
   }
+
+  const token = jwt.sign({ userId: user.userId }, "customized-secret-key");
+  res.send({
+    token,
+  });
 });
 
 router.get("/users/me", authMiddleware, async (req, res) => {
@@ -104,28 +68,28 @@ router.get("/users/me", authMiddleware, async (req, res) => {
 router.get("/goods/cart", authMiddleware, async (req, res) => {
   const { userId } = res.locals.user;
 
-  const cart = await Cart.find({
-    userId,
-  }).exec();
+  const cart = await Cart.findAll({
+    where: {
+      userId,
+    },
+  });
 
   const goodsIds = cart.map((c) => c.goodsId);
 
   // 루프 줄이기 위해 Mapping 가능한 객체로 만든것
-  const goodsKeyById = await Goods.find({
+  const goodsKeyById = await Goods.findAll({
     where: {
       goodsId: goodsIds,
     },
-  })
-    .exec()
-    .then((goods) =>
-      goods.reduce(
-        (prev, g) => ({
-          ...prev,
-          [g.goodsId]: g,
-        }),
-        {}
-      )
-    );
+  }).then((goods) =>
+    goods.reduce(
+      (prev, g) => ({
+        ...prev,
+        [g.goodsId]: g,
+      }),
+      {}
+    )
+  );
 
   res.send({
     cart: cart.map((c) => ({
@@ -145,23 +109,24 @@ router.put("/goods/:goodsId/cart", authMiddleware, async (req, res) => {
   const { quantity } = req.body;
 
   const existsCart = await Cart.findOne({
-    userId,
-    goodsId,
-  }).exec();
+    where: {
+      userId,
+      goodsId,
+    },
+  });
 
   if (existsCart) {
     existsCart.quantity = quantity;
     await existsCart.save();
   } else {
-    const cart = new Cart({
+    await Cart.create({
       userId,
       goodsId,
       quantity,
     });
-    await cart.save();
   }
 
-  // NOTE: 성공했을때 딱히 정해진 응답 값이 없다.
+  // NOTE: 성공했을때 응답 값을 클라이언트가 사용하지 않는다.
   res.send({});
 });
 
@@ -173,13 +138,15 @@ router.delete("/goods/:goodsId/cart", authMiddleware, async (req, res) => {
   const { goodsId } = req.params;
 
   const existsCart = await Cart.findOne({
-    userId,
-    goodsId,
-  }).exec();
+    where: {
+      userId,
+      goodsId,
+    },
+  });
 
   // 있든 말든 신경 안쓴다. 그냥 있으면 지운다.
   if (existsCart) {
-    await existsCart.delete().exec();
+    await existsCart.destroy();
   }
 
   // NOTE: 성공했을때 딱히 정해진 응답 값이 없다.
@@ -196,9 +163,10 @@ router.delete("/goods/:goodsId/cart", authMiddleware, async (req, res) => {
  */
 router.get("/goods", authMiddleware, async (req, res) => {
   const { category } = req.query;
-  const goods = await Goods.find(category ? { category } : undefined)
-    .sort("-date")
-    .exec();
+  const goods = await Goods.findAll({
+    order: [["goodsId", "DESC"]],
+    where: category ? { category } : undefined,
+  });
 
   res.send({ goods });
 });
@@ -208,7 +176,7 @@ router.get("/goods", authMiddleware, async (req, res) => {
  */
 router.get("/goods/:goodsId", authMiddleware, async (req, res) => {
   const { goodsId } = req.params;
-  const goods = await Goods.findById(goodsId).exec();
+  const goods = await Goods.findByPk(goodsId);
 
   if (!goods) {
     res.status(404).send({});
@@ -217,8 +185,24 @@ router.get("/goods/:goodsId", authMiddleware, async (req, res) => {
   }
 });
 
+
+/**
+ * 상품 등록하기
+ */
+router.post("/goods", authMiddleware, async (req, res) => {
+  const { goodsId, name, thumbnailUrl, category, price } = req.body;
+
+  const goods = await Goods.findByPk(goodsId);
+  if (goods) {
+    return res.status(400).json({ success: false, errorMessage: "이미 있는 데이터입니다." });
+  }
+
+  const createdGoods = await Goods.create({ goodsId, name, thumbnailUrl, category, price });
+
+  res.status(201).json({ goods: createdGoods });
+});
+
 app.use("/api", express.urlencoded({ extended: false }), router);
-app.use(express.static("assets"));
 
 app.listen(8080, () => {
   console.log("서버가 요청을 받을 준비가 됐어요");
